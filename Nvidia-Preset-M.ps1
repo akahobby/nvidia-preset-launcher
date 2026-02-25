@@ -1,103 +1,135 @@
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$launchedFromExplorer = $false
-try {
-    $pp = Get-CimInstance Win32_Process -Filter "ProcessId=$PID"
-    if ($pp -and $pp.ParentProcessId) {
-        $parentProc = Get-Process -Id $pp.ParentProcessId -ErrorAction Stop
-        if ($parentProc.Name -eq 'explorer') { $launchedFromExplorer = $true }
-    }
-} catch {}
+$Paths = @{
+    DocumentsRoot = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Documents'
+    TempNip       = Join-Path $env:TEMP 'nv_profile.nip'
+    DrsPath       = 'C:\ProgramData\NVIDIA Corporation\Drs'
+    LogPath       = Join-Path $env:TEMP 'NvidiaProfileInspector.log'
+}
+$Paths.InspectorDir = Join-Path $Paths.DocumentsRoot 'NvidiaProfileInspector'
+$Paths.InspectorExe = Join-Path $Paths.InspectorDir 'Inspector.exe'
 
-try {
-    $logPath = Join-Path $env:TEMP 'NvidiaProfileInspector.log'
-    Start-Transcript -Path $logPath -Append | Out-Null
-} catch {}
+$InspectorUrl = 'https://github.com/FR33THYFR33THY/files/raw/main/Inspector.exe'
+$NvControlPanelApp = 'shell:appsFolder\NVIDIACorp.NVIDIAControlPanel_56jybvy8sckqj!NVIDIACorp.NVIDIAControlPanel'
 
-trap {
-    try { Stop-Transcript | Out-Null } catch {}
-    if ($launchedFromExplorer) {
-        Write-Host "An error occurred. See log at: $logPath" -ForegroundColor Red
-        Write-Host $_ -ForegroundColor Red
-        Read-Host "Press Enter to exit"
-    }
-    break
+function Write-Status([string]$Tag, [string]$Message, [string]$Color) {
+    Write-Host "[$Tag] $Message" -ForegroundColor $Color
 }
 
-$principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
-if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    $psExe = (Get-Process -Id $PID).Path
-    Start-Process -FilePath $psExe -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
+function Write-Info([string]$Message) { Write-Status -Tag '*'  -Message $Message -Color 'Cyan' }
+function Write-Ok([string]$Message)   { Write-Status -Tag 'OK' -Message $Message -Color 'Green' }
+function Write-Warn([string]$Message) { Write-Status -Tag '!'  -Message $Message -Color 'Yellow' }
+
+function Test-LaunchedFromExplorer {
+    try {
+        $selfProcess = Get-CimInstance Win32_Process -Filter "ProcessId=$PID"
+        if (-not $selfProcess.ParentProcessId) { return $false }
+
+        $parent = Get-Process -Id $selfProcess.ParentProcessId -ErrorAction Stop
+        return ($parent.Name -eq 'explorer')
+    } catch {
+        return $false
+    }
+}
+
+function Start-SessionTranscript {
+    try {
+        Start-Transcript -Path $Paths.LogPath -Append | Out-Null
+    } catch {}
+}
+
+function Set-ConsoleTheme {
+    try {
+        $Host.UI.RawUI.WindowTitle = "$($MyInvocation.MyCommand.Definition) (Administrator)"
+        $Host.UI.RawUI.BackgroundColor = 'Black'
+        $Host.PrivateData.ProgressBackgroundColor = 'Black'
+        $Host.PrivateData.ProgressForegroundColor = 'White'
+        Clear-Host
+    } catch {}
+}
+
+function Ensure-RunningAsAdministrator {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+
+    if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { return }
+
+    $currentProcessPath = (Get-Process -Id $PID).Path
+    $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
+    Start-Process -FilePath $currentProcessPath -Verb RunAs -ArgumentList $arguments
     exit
 }
-try {
-    $Host.UI.RawUI.WindowTitle = ($MyInvocation.MyCommand.Definition + " (Administrator)")
-    $Host.UI.RawUI.BackgroundColor = "Black"
-    $Host.PrivateData.ProgressBackgroundColor = "Black"
-    $Host.PrivateData.ProgressForegroundColor = "White"
-    Clear-Host
-} catch {}
-
-$DocumentsRoot = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Documents'
-$InspectorDir  = Join-Path $DocumentsRoot 'NvidiaProfileInspector'
-$InspectorExe  = Join-Path $InspectorDir 'Inspector.exe'
-$InspectorURL  = 'https://github.com/FR33THYFR33THY/files/raw/main/Inspector.exe'
-$TempNip       = Join-Path $env:TEMP 'nv_profile.nip'
-$DrsPath       = 'C:\ProgramData\NVIDIA Corporation\Drs'
-
-function Write-Info($msg){ Write-Host "[*] $msg" -ForegroundColor Cyan }
-function Write-Ok($msg){ Write-Host "[OK] $msg" -ForegroundColor Green }
-function Write-Warn($msg){ Write-Host "[!] $msg" -ForegroundColor Yellow }
 
 function Confirm-Inspector {
-    if (-not (Test-Path $InspectorExe)) {
-        Write-Info "Downloading Nvidia Profile Inspector to: $InspectorExe"
-        New-Item -ItemType Directory -Path $InspectorDir -Force | Out-Null
-        Invoke-WebRequest -Uri $InspectorURL -OutFile $InspectorExe
-        Write-Ok "Downloaded Inspector.exe"
-    } else {
-        Write-Info "Using existing Inspector at $InspectorExe"
+    if (Test-Path $Paths.InspectorExe) {
+        Write-Info "Using existing Inspector at $($Paths.InspectorExe)"
+        return
     }
+
+    Write-Info "Downloading Nvidia Profile Inspector to: $($Paths.InspectorExe)"
+    New-Item -Path $Paths.InspectorDir -ItemType Directory -Force | Out-Null
+    Invoke-WebRequest -Uri $InspectorUrl -OutFile $Paths.InspectorExe
+    Write-Ok 'Downloaded Inspector.exe'
 }
 
 function Unblock-Drs {
-    if (Test-Path $DrsPath) {
-        Write-Info "Unblocking DRS files..."
-        Get-ChildItem -Path $DrsPath -Recurse -File -ErrorAction SilentlyContinue | Unblock-File
-        Write-Ok "DRS unblocked"
-    } else {
-        Write-Warn "DRS path not found ($DrsPath). Skipping unblock."
+    if (-not (Test-Path $Paths.DrsPath)) {
+        Write-Warn "DRS path not found ($($Paths.DrsPath)). Skipping unblock."
+        return
     }
+
+    Write-Info 'Unblocking DRS files...'
+    Get-ChildItem -Path $Paths.DrsPath -File -Recurse -ErrorAction SilentlyContinue | Unblock-File
+    Write-Ok 'DRS unblocked'
 }
 
-function Set-NipXml([string]$nipXml) {
-    Set-Content -Path $TempNip -Value $nipXml -Encoding UTF8 -Force
-    Write-Info "Importing profile via Inspector..."
-    Start-Process -FilePath $InspectorExe -ArgumentList "`"$TempNip`"" -Wait
-    Remove-Item $TempNip -Force -ErrorAction SilentlyContinue
-    Write-Ok "Profile applied"
+function Set-NipXml([string]$NipXml) {
+    Set-Content -Path $Paths.TempNip -Value $NipXml -Encoding UTF8 -Force
+    Write-Info 'Importing profile via Inspector...'
+    Start-Process -FilePath $Paths.InspectorExe -ArgumentList "`"$($Paths.TempNip)`"" -Wait
+    Remove-Item -Path $Paths.TempNip -Force -ErrorAction SilentlyContinue
+    Write-Ok 'Profile applied'
 }
 
-function Set-LegacySharpen([bool]$enable) {
-    $value = if ($enable) { 0 } else { 1 }
-    $keys = @(
+function Set-LegacySharpen([bool]$Enable) {
+    $registryValue = if ($Enable) { 0 } else { 1 }
+    $registryTargets = @(
         'HKLM:\SYSTEM\CurrentControlSet\Services\nvlddmkm\FTS',
         'HKLM:\SYSTEM\CurrentControlSet\Services\nvlddmkm\Parameters\FTS',
         'HKLM:\SYSTEM\ControlSet001\Services\nvlddmkm\Parameters\FTS'
     )
-    foreach ($k in $keys) {
-        if (Test-Path $k) {
-            New-ItemProperty -Path $k -Name EnableGR535 -PropertyType DWord -Value $value -Force | Out-Null
-        }
+
+    foreach ($target in $registryTargets) {
+        if (-not (Test-Path $target)) { continue }
+
+        New-ItemProperty -Path $target -Name EnableGR535 -PropertyType DWord -Value $registryValue -Force | Out-Null
     }
-    Write-Ok ("Legacy sharpen " + ($(if($enable){"ENABLED (0)"} else {"DISABLED (1)"})))
+
+    $mode = if ($Enable) { 'ENABLED (0)' } else { 'DISABLED (1)' }
+    Write-Ok "Legacy sharpen $mode"
 }
 
 function Open-NvCpl {
-    Write-Info "Opening NVIDIA Control Panel..."
-    Start-Process "shell:appsFolder\NVIDIACorp.NVIDIAControlPanel_56jybvy8sckqj!NVIDIACorp.NVIDIAControlPanel" | Out-Null
+    Write-Info 'Opening NVIDIA Control Panel...'
+    Start-Process $NvControlPanelApp | Out-Null
 }
+
+$launchedFromExplorer = Test-LaunchedFromExplorer
+Start-SessionTranscript
+
+trap {
+    try { Stop-Transcript | Out-Null } catch {}
+    if ($launchedFromExplorer) {
+        Write-Host "An error occurred. See log at: $($Paths.LogPath)" -ForegroundColor Red
+        Write-Host $_ -ForegroundColor Red
+        Read-Host 'Press Enter to exit'
+    }
+    break
+}
+
+Ensure-RunningAsAdministrator
+Set-ConsoleTheme
 
 $Profile_On = @'
 <?xml version="1.0" encoding="utf-16"?>
@@ -343,26 +375,33 @@ $Profile_Default = @'
 </ArrayOfProfile>
 '@
 
+function Read-PresetSelection {
+    Write-Host ''
+    Write-Host '1) NVIDIA Settings: On (Recommended)'
+    Write-Host '2) NVIDIA Settings: Default'
+
+    do {
+        $selection = Read-Host 'Select 1-2'
+    } until ($selection -match '^[1-2]$')
+
+    return $selection
+}
+
+function Invoke-PresetSelection([string]$Selection) {
+    if ($Selection -eq '1') {
+        Set-NipXml -NipXml $Profile_On
+        Set-LegacySharpen -Enable:$true
+    } else {
+        Set-NipXml -NipXml $Profile_Default
+        Set-LegacySharpen -Enable:$false
+    }
+
+    Open-NvCpl
+}
+
 Confirm-Inspector
 Unblock-Drs
 
-Write-Host ""
-Write-Host "1) NVIDIA Settings: On (Recommended)"
-Write-Host "2) NVIDIA Settings: Default"
-do {
-    $choice = Read-Host "Select 1-2"
-} until ($choice -match '^[1-2]$')
-
-switch ($choice) {
-    '1' {
-        Set-NipXml -nipXml $Profile_On
-        Set-LegacySharpen -enable:$true
-        Open-NvCpl
-    }
-    '2' {
-        Set-NipXml -nipXml $Profile_Default
-        Set-LegacySharpen -enable:$false
-        Open-NvCpl
-    }
-}
+$selectedPreset = Read-PresetSelection
+Invoke-PresetSelection -Selection $selectedPreset
 
