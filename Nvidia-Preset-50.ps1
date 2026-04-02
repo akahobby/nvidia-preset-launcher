@@ -570,12 +570,6 @@ $Profile_On = @'
         <ValueType>Dword</ValueType>
       </ProfileSetting>
       <ProfileSetting>
-        <SettingNameInfo>Override DLSS-SR performance mode</SettingNameInfo>
-        <SettingID>279951208</SettingID>
-        <SettingValue>5</SettingValue>
-        <ValueType>Dword</ValueType>
-      </ProfileSetting>
-      <ProfileSetting>
         <SettingNameInfo> </SettingNameInfo>
         <SettingID>281106605</SettingID>
         <SettingValue>0</SettingValue>

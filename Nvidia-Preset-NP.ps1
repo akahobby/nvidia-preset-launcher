@@ -294,12 +294,6 @@ $Profile_On = @'
         <ValueType>Dword</ValueType>
       </ProfileSetting>
       <ProfileSetting>
-        <SettingNameInfo>Override DLSS-SR performance mode</SettingNameInfo>
-        <SettingID>279951208</SettingID>
-        <SettingValue>5</SettingValue>
-        <ValueType>Dword</ValueType>
-      </ProfileSetting>
-      <ProfileSetting>
         <SettingNameInfo>Anisotropic filtering mode</SettingNameInfo>
         <SettingID>282245910</SettingID>
         <SettingValue>0</SettingValue>
