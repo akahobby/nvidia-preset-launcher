@@ -20,7 +20,7 @@ The launcher is a single `.bat` file that:
 - Internet access (for downloading the preset scripts and Inspector)
 - NVIDIA Control Panel installed
 
-You do **not** need to download NVIDIA Profile Inspector manually – the scripts will fetch `Inspector.exe` into your `Documents\NvidiaProfileInspector` folder if it’s missing.
+You do **not** need to download NVIDIA Profile Inspector manually – the scripts query the [Orbmu2k nvidiaProfileInspector](https://github.com/Orbmu2k/nvidiaProfileInspector) **GitHub Releases API** for the newest published release (including prereleases), download its `.zip` asset, extract `nvidiaProfileInspector.exe`, and copy it to `Documents\NvidiaProfileInspector\Inspector.exe` if a valid copy is not already there.
 
 ---
 
@@ -94,6 +94,10 @@ Each PowerShell preset offers:
   - Confirm the correct profile is active in NVIDIA Profile Inspector.
 - **Game shows black screen / weird DLSS behavior**
   - Re‑apply **Preset NP** and/or use its **Default** option.
-- **Inspector not found**
-  - Scripts auto‑download Inspector into `Documents\NvidiaProfileInspector`.  
-    Delete and re‑run a preset if you want to force a fresh copy.
+- **Inspector not found or “not a valid Win32 application”**
+  - Scripts install Inspector into `Documents\NvidiaProfileInspector`.  
+    Delete `Inspector.exe` in that folder (or the whole folder) and re‑run a preset; a bad HTML/404 file from an old URL is detected and replaced automatically in current scripts.
+- **Errors mentioning `$InspectorUrl` or line ~72 with `Invoke-WebRequest` to `Inspector.exe`**
+  - The launcher downloads `Nvidia-Preset-*.ps1` from **your repo’s `main` branch** each run. Push the latest preset scripts to GitHub so the batch file does not keep using an old copy in `%TEMP%`.
+- **“Connection was closed unexpectedly” when downloading**
+  - Current scripts retry `Invoke-WebRequest` and fall back to Windows `curl.exe` for large release downloads. Check VPN/firewall/antivirus blocking GitHub or `github.com` / `objects.githubusercontent.com`.

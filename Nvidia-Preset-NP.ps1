@@ -10,7 +10,6 @@ $Paths = @{
 $Paths.InspectorDir = Join-Path $Paths.DocumentsRoot 'NvidiaProfileInspector'
 $Paths.InspectorExe = Join-Path $Paths.InspectorDir 'Inspector.exe'
 
-$InspectorUrl = 'https://github.com/FR33THYFR33THY/files/raw/main/Inspector.exe'
 $NvControlPanelApp = 'shell:appsFolder\NVIDIACorp.NVIDIAControlPanel_56jybvy8sckqj!NVIDIACorp.NVIDIAControlPanel'
 
 function Write-Status([string]$Tag, [string]$Message, [string]$Color) {
@@ -61,16 +60,114 @@ function Ensure-RunningAsAdministrator {
     exit
 }
 
+function Invoke-ReliableHttpGet {
+    param(
+        [Parameter(Mandatory)][string]$Uri,
+        [string]$OutFile,
+        [hashtable]$Headers = @{},
+        [string]$UserAgent = 'nvidia-preset-launcher',
+        [int]$Retries = 4
+    )
+    $ProgressPreference = 'SilentlyContinue'
+    $last = $null
+    for ($attempt = 0; $attempt -lt $Retries; $attempt++) {
+        try {
+            if ($OutFile) {
+                Invoke-WebRequest -Uri $Uri -OutFile $OutFile -UseBasicParsing -TimeoutSec 180 -Headers $Headers -UserAgent $UserAgent
+                if (-not (Test-Path -LiteralPath $OutFile) -or (Get-Item -LiteralPath $OutFile).Length -lt 1) {
+                    throw 'Downloaded file missing or empty'
+                }
+                return
+            }
+            return (Invoke-WebRequest -Uri $Uri -UseBasicParsing -TimeoutSec 120 -Headers $Headers -UserAgent $UserAgent).Content
+        } catch {
+            $last = $_
+            if ($OutFile) { Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue }
+            if ($attempt -lt $Retries - 1) {
+                Start-Sleep -Seconds ([Math]::Min(16, [Math]::Pow(2, $attempt)))
+            }
+        }
+    }
+    if ($OutFile) {
+        $curl = Join-Path $env:WINDIR 'System32\curl.exe'
+        if (Test-Path -LiteralPath $curl) {
+            $curlArgs = [System.Collections.ArrayList]@('-fsSL', '-A', $UserAgent, '--connect-timeout', '30', '--max-time', '600', '--retry', '3', '--retry-delay', '2')
+            foreach ($k in $Headers.Keys) {
+                [void]$curlArgs.Add('-H')
+                [void]$curlArgs.Add(('{0}: {1}' -f $k, $Headers[$k]))
+            }
+            [void]$curlArgs.Add('-o')
+            [void]$curlArgs.Add($OutFile)
+            [void]$curlArgs.Add($Uri)
+            & $curl @($curlArgs.ToArray())
+            if ((Test-Path -LiteralPath $OutFile) -and (Get-Item -LiteralPath $OutFile).Length -gt 0) { return }
+        }
+    }
+    throw ("HTTP GET failed for {0}: {1}" -f $Uri, $last.Exception.Message)
+}
+
+function Get-LatestInspectorReleaseInfo {
+    $uri = 'https://api.github.com/repos/Orbmu2k/nvidiaProfileInspector/releases?per_page=25'
+    try {
+        $json = Invoke-ReliableHttpGet -Uri $uri -Headers @{ Accept = 'application/vnd.github+json' }
+        $releases = $json | ConvertFrom-Json
+    } catch {
+        throw "Could not query GitHub for Profile Inspector releases: $($_.Exception.Message)"
+    }
+    foreach ($rel in $releases) {
+        if (-not $rel.assets) { continue }
+        $assets = @($rel.assets)
+        $asset = $assets | Where-Object { $_.name -ieq 'nvidiaProfileInspector.zip' } | Select-Object -First 1
+        if (-not $asset) {
+            $asset = $assets | Where-Object { $_.name -like '*.zip' -and $_.name -match 'profileinspector' } | Select-Object -First 1
+        }
+        if ($asset -and $asset.browser_download_url) {
+            return [pscustomobject]@{
+                DownloadUrl = [string]$asset.browser_download_url
+                Tag         = [string]$rel.tag_name
+            }
+        }
+    }
+    throw 'No suitable .zip asset found in recent Orbmu2k/nvidiaProfileInspector GitHub releases.'
+}
+
 function Confirm-Inspector {
-    if (Test-Path $Paths.InspectorExe) {
+    $inspectorOk = $false
+    if (Test-Path -LiteralPath $Paths.InspectorExe) {
+        try {
+            $fs = [System.IO.File]::OpenRead($Paths.InspectorExe)
+            try {
+                $buf = New-Object byte[] 2
+                [void]$fs.Read($buf, 0, 2)
+                if ($buf[0] -eq 0x4D -and $buf[1] -eq 0x5A) { $inspectorOk = $true }
+            } finally { $fs.Dispose() }
+        } catch {}
+    }
+    if ($inspectorOk) {
         Write-Info "Using existing Inspector at $($Paths.InspectorExe)"
         return
     }
+    if (Test-Path -LiteralPath $Paths.InspectorExe) {
+        Write-Warn 'Removing invalid Inspector.exe (wrong file or corrupt download).'
+        Remove-Item -LiteralPath $Paths.InspectorExe -Force -ErrorAction SilentlyContinue
+    }
 
-    Write-Info "Downloading Nvidia Profile Inspector to: $($Paths.InspectorExe)"
+    $release = Get-LatestInspectorReleaseInfo
+    Write-Info ("Downloading latest Nvidia Profile Inspector ({0}) to: {1}" -f $release.Tag, $Paths.InspectorDir)
     New-Item -Path $Paths.InspectorDir -ItemType Directory -Force | Out-Null
-    Invoke-WebRequest -Uri $InspectorUrl -OutFile $Paths.InspectorExe
-    Write-Ok 'Downloaded Inspector.exe'
+    $zip = Join-Path $env:TEMP ('nvProfileInspector_{0}.zip' -f [Guid]::NewGuid().ToString('N'))
+    $stage = Join-Path $env:TEMP ('nvProfileInspector_{0}' -f [Guid]::NewGuid().ToString('N'))
+    try {
+        Invoke-ReliableHttpGet -Uri $release.DownloadUrl -OutFile $zip
+        Expand-Archive -LiteralPath $zip -DestinationPath $stage -Force
+        $found = Get-ChildItem -Path $stage -Recurse -Filter 'nvidiaProfileInspector.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $found) { throw 'nvidiaProfileInspector.exe not found in release zip.' }
+        Copy-Item -LiteralPath $found.FullName -Destination $Paths.InspectorExe -Force
+        Write-Ok ("Installed Inspector.exe from Orbmu2k release {0}" -f $release.Tag)
+    } finally {
+        Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
 
 function Unblock-Drs {
@@ -85,7 +182,7 @@ function Unblock-Drs {
 }
 
 function Set-NipXml([string]$NipXml) {
-    Set-Content -Path $Paths.TempNip -Value $NipXml -Encoding UTF8 -Force
+    Set-Content -Path $Paths.TempNip -Value $NipXml -Encoding Unicode -Force
     Write-Info 'Importing profile via Inspector...'
     Start-Process -FilePath $Paths.InspectorExe -ArgumentList "`"$($Paths.TempNip)`"" -Wait
     Remove-Item -Path $Paths.TempNip -Force -ErrorAction SilentlyContinue
